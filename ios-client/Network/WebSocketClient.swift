@@ -9,6 +9,16 @@ enum ConnectionState: Equatable {
     case error(String)
 }
 
+enum DiagnosticTransitionType: String {
+    case manualAction = "MANUAL_ACTION"
+    case networkEvent = "NETWORK_EVENT"
+    case socketError = "SOCKET_ERROR"
+    case timeout = "TIMEOUT"
+    case handshake = "HANDSHAKE"
+    case heartbeat = "HEARTBEAT"
+    case cancellation = "CANCELLATION"
+}
+
 final class WebSocketClient: NSObject, ObservableObject {
     static let shared = WebSocketClient()
 
@@ -23,20 +33,56 @@ final class WebSocketClient: NSObject, ObservableObject {
     private let storage = StorageManager.shared
     private let keychain = KeychainHelper.shared
 
+    // Authoritative session tracking to prevent race conditions from superseded sockets
+    private var activeSessionId = UUID()
     private var isPairingSession = false
     private var pendingPairingToken: String?
     private var shouldReconnect = true
     private var reconnectAttempt = 0
+    private var pendingReconnectWorkItem: DispatchWorkItem?
+
+    // Heartbeat & keep-alive state
+    private var heartbeatTimer: Timer?
+    private var consecutiveHeartbeatFailures = 0
+    private let maxHeartbeatFailures = 3
+    private let heartbeatInterval: TimeInterval = 15.0
 
     private override init() {
         super.init()
+    }
+
+    // MARK: - State Management & Diagnostics
+
+    private func transitionState(
+        to newState: ConnectionState,
+        reason: String,
+        type: DiagnosticTransitionType
+    ) {
+        let oldState = self.connectionState
+        guard oldState != newState else { return }
+
+        self.connectionState = newState
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let sessionPrefix = activeSessionId.uuidString.prefix(8)
+        print("[DIAGNOSTICS] [\(timestamp)] [Session: \(sessionPrefix)] State: \(stateName(oldState)) -> \(stateName(newState)) | Type: \(type.rawValue) | Reason: \(reason)")
+    }
+
+    private func stateName(_ state: ConnectionState) -> String {
+        switch state {
+        case .disconnected: return "DISCONNECTED"
+        case .connecting: return "CONNECTING"
+        case .connectedUnauthenticated: return "CONNECTED_UNAUTH"
+        case .authenticated(let name): return "AUTHENTICATED(\(name))"
+        case .error(let msg): return "ERROR(\(msg))"
+        }
     }
 
     // MARK: - Pairing & Connection Flow
 
     func pair(with envelope: QrPairingEnvelope) {
         guard !envelope.endpoints.isEmpty else {
-            self.connectionState = .error("No valid endpoints in QR code")
+            transitionState(to: .error("No valid endpoints in QR code"), reason: "Empty endpoint list", type: .manualAction)
             return
         }
 
@@ -55,26 +101,56 @@ final class WebSocketClient: NSObject, ObservableObject {
     }
 
     func reconnectUsingSavedCredentials() {
+        // Prevent overlapping connection attempts when already connected or connecting
+        if case .authenticated = connectionState {
+            print("[WS] Already authenticated and connected; ignoring redundant reconnect request.")
+            return
+        }
+        if case .connecting = connectionState || case .connectedUnauthenticated = connectionState {
+            print("[WS] Connection already in progress; ignoring duplicate attempt.")
+            return
+        }
+
         guard let endpoint = keychain.read(key: "lastEndpoint"),
               let certSha = keychain.read(key: "pinnedCertSha256"),
               let _ = keychain.read(key: "clientAuthToken") else {
-            self.connectionState = .disconnected
+            transitionState(to: .disconnected, reason: "No saved credentials found", type: .manualAction)
             return
         }
 
         self.isPairingSession = false
         self.pendingPairingToken = nil
+        self.shouldReconnect = true
         pinningDelegate.setPinnedFingerprint(certSha)
         connect(to: endpoint)
     }
 
     func connect(to endpointString: String) {
-        disconnect(userInitiated: false)
+        // Do not recreate socket if already authenticated to this endpoint
+        if case .authenticated = connectionState, currentEndpoint == endpointString {
+            print("[WS] Already authenticated to \(endpointString); skipping duplicate connection.")
+            return
+        }
+        if case .connecting = connectionState, currentEndpoint == endpointString {
+            print("[WS] Connection already in progress to \(endpointString); skipping duplicate connection.")
+            return
+        }
+
+        // Cancel any pending reconnect timers
+        cancelPendingReconnect()
+
+        // Generate new authoritative session ID to invalidate callbacks from previous sockets
+        let newSessionId = UUID()
+        self.activeSessionId = newSessionId
         self.currentEndpoint = endpointString
-        self.connectionState = .connecting
+
+        // Teardown previous socket cleanly without posting asynchronous .disconnected state
+        teardownCurrentSocket()
+
+        transitionState(to: .connecting, reason: "Initiating connection to \(endpointString)", type: .networkEvent)
 
         guard let url = URL(string: endpointString) else {
-            self.connectionState = .error("Invalid URL format: \(endpointString)")
+            transitionState(to: .error("Invalid URL format: \(endpointString)"), reason: "URL parsing error", type: .manualAction)
             return
         }
 
@@ -82,21 +158,22 @@ final class WebSocketClient: NSObject, ObservableObject {
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 300
 
-        self.urlSession = URLSession(
+        let session = URLSession(
             configuration: configuration,
             delegate: pinningDelegate,
             delegateQueue: OperationQueue()
         )
+        self.urlSession = session
 
-        let task = self.urlSession!.webSocketTask(with: url)
+        let task = session.webSocketTask(with: url)
         self.webSocketTask = task
         task.resume()
 
-        listenForMessages()
+        listenForMessages(for: newSessionId)
 
         // Wait brief moment for TLS handshake, then trigger auth or pair
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.activeSessionId == newSessionId else { return }
             if self.isPairingSession {
                 self.sendPairRequest()
             } else {
@@ -106,26 +183,93 @@ final class WebSocketClient: NSObject, ObservableObject {
     }
 
     func disconnect(userInitiated: Bool = true) {
+        cancelPendingReconnect()
         if userInitiated {
             shouldReconnect = false
         }
+        teardownCurrentSocket()
+        transitionState(
+            to: .disconnected,
+            reason: userInitiated ? "User initiated disconnect" : "Socket cleanup",
+            type: userInitiated ? .manualAction : .networkEvent
+        )
+    }
+
+    private func teardownCurrentSocket() {
+        stopHeartbeat()
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
-        DispatchQueue.main.async {
-            self.connectionState = .disconnected
-        }
     }
 
     func revokePairing() {
+        cancelPendingReconnect()
         disconnect(userInitiated: true)
         keychain.clearAll()
         storage.clearAllLocalData()
         DispatchQueue.main.async {
             self.activeSimCards = []
             self.gatewayDeviceName = "Unknown Gateway"
-            self.connectionState = .disconnected
+            self.transitionState(to: .disconnected, reason: "Pairing revoked by user", type: .manualAction)
+        }
+    }
+
+    // MARK: - Heartbeat & Keep-Alive
+
+    private func startHeartbeat() {
+        stopHeartbeat()
+        consecutiveHeartbeatFailures = 0
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.heartbeatTimer = Timer.scheduledTimer(withTimeInterval: self.heartbeatInterval, repeats: true) { [weak self] _ in
+                self?.sendHeartbeatPing()
+            }
+        }
+    }
+
+    private func stopHeartbeat() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        consecutiveHeartbeatFailures = 0
+    }
+
+    private func sendHeartbeatPing() {
+        guard case .authenticated = connectionState, let task = webSocketTask else { return }
+        let sessionId = self.activeSessionId
+        let pingStart = Date()
+        let timestamp = ISO8601DateFormatter().string(from: pingStart)
+        let sessionPrefix = sessionId.uuidString.prefix(8)
+        print("[DIAGNOSTICS] [\(timestamp)] [Session: \(sessionPrefix)] Heartbeat ping sent")
+
+        task.sendPing { [weak self] error in
+            guard let self = self, self.activeSessionId == sessionId else { return }
+            let durationMs = Int(Date().timeIntervalSince(pingStart) * 1000)
+            let responseTimestamp = ISO8601DateFormatter().string(from: Date())
+
+            DispatchQueue.main.async {
+                guard self.activeSessionId == sessionId else { return }
+                if let error = error {
+                    self.consecutiveHeartbeatFailures += 1
+                    print("[DIAGNOSTICS] [\(responseTimestamp)] [Session: \(sessionPrefix)] Heartbeat failed (\(durationMs)ms, attempt \(self.consecutiveHeartbeatFailures)/\(self.maxHeartbeatFailures)): \(error.localizedDescription)")
+
+                    // Only disconnect after max consecutive failures (tolerance against transient network jitter)
+                    if self.consecutiveHeartbeatFailures >= self.maxHeartbeatFailures {
+                        self.transitionState(
+                            to: .error("Heartbeat timed out after \(self.maxHeartbeatFailures) consecutive attempts"),
+                            reason: "Heartbeat failure threshold reached",
+                            type: .timeout
+                        )
+                        self.handleDisconnection()
+                    }
+                } else {
+                    if self.consecutiveHeartbeatFailures > 0 {
+                        print("[DIAGNOSTICS] [\(responseTimestamp)] [Session: \(sessionPrefix)] Heartbeat recovered after \(self.consecutiveHeartbeatFailures) transient missed ping(s)")
+                    }
+                    self.consecutiveHeartbeatFailures = 0
+                    print("[DIAGNOSTICS] [\(responseTimestamp)] [Session: \(sessionPrefix)] Heartbeat pong received (\(durationMs)ms round-trip)")
+                }
+            }
         }
     }
 
@@ -148,7 +292,7 @@ final class WebSocketClient: NSObject, ObservableObject {
     private func sendAuthenticate() {
         guard let authToken = keychain.read(key: "clientAuthToken") else {
             DispatchQueue.main.async {
-                self.connectionState = .error("No saved authentication token")
+                self.transitionState(to: .error("No saved authentication token"), reason: "Missing token in Keychain", type: .manualAction)
             }
             return
         }
@@ -208,16 +352,35 @@ final class WebSocketClient: NSObject, ObservableObject {
 
     // MARK: - Incoming Message Listener
 
-    private func listenForMessages() {
+    private func listenForMessages(for sessionId: UUID) {
         webSocketTask?.receive { [weak self] result in
             guard let self = self else { return }
+
+            // Guard against callbacks from previous superseded sockets
+            guard self.activeSessionId == sessionId else {
+                return
+            }
+
             switch result {
             case .failure(let error):
+                let nsError = error as NSError
+                // If the socket was intentionally cancelled (e.g. by new connection or user disconnect), ignore error
+                if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled {
+                    print("[WS] Superseded socket cancelled (\(sessionId.uuidString.prefix(8)))")
+                    return
+                }
+
                 print("[WS] WebSocket receive error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    self.connectionState = .error("Connection lost: \(error.localizedDescription)")
+                    guard self.activeSessionId == sessionId else { return }
+                    self.transitionState(
+                        to: .error("Connection lost: \(error.localizedDescription)"),
+                        reason: "Socket receive error: \(error.localizedDescription)",
+                        type: .socketError
+                    )
+                    self.handleDisconnection()
                 }
-                self.handleDisconnection()
+
             case .success(let message):
                 switch message {
                 case .string(let text):
@@ -229,8 +392,8 @@ final class WebSocketClient: NSObject, ObservableObject {
                 @unknown default:
                     break
                 }
-                // Continue listening
-                self.listenForMessages()
+                // Continue listening on the same session
+                self.listenForMessages(for: sessionId)
             }
         }
     }
@@ -300,11 +463,21 @@ final class WebSocketClient: NSObject, ObservableObject {
             if let sims = payload.simCards {
                 self.activeSimCards = sims
             }
-            self.connectionState = .authenticated(gatewayName: payload.gatewayDeviceName)
+            cancelPendingReconnect()
             self.reconnectAttempt = 0
+            transitionState(
+                to: .authenticated(gatewayName: payload.gatewayDeviceName),
+                reason: "Pairing handshake successful",
+                type: .handshake
+            )
+            startHeartbeat()
             self.requestSync()
         } else {
-            self.connectionState = .error(payload.errorMessage ?? "Pairing rejected by Android Gateway")
+            transitionState(
+                to: .error(payload.errorMessage ?? "Pairing rejected by Android Gateway"),
+                reason: "Gateway rejected pairing",
+                type: .handshake
+            )
         }
     }
 
@@ -314,11 +487,21 @@ final class WebSocketClient: NSObject, ObservableObject {
             if let sims = payload.simCards {
                 self.activeSimCards = sims
             }
-            self.connectionState = .authenticated(gatewayName: payload.gatewayDeviceName)
+            cancelPendingReconnect()
             self.reconnectAttempt = 0
+            transitionState(
+                to: .authenticated(gatewayName: payload.gatewayDeviceName),
+                reason: "Authentication handshake successful",
+                type: .handshake
+            )
+            startHeartbeat()
             self.requestSync()
         } else {
-            self.connectionState = .error(payload.errorMessage ?? "Authentication failed")
+            transitionState(
+                to: .error(payload.errorMessage ?? "Authentication failed"),
+                reason: "Gateway rejected authentication credentials",
+                type: .handshake
+            )
         }
     }
 
@@ -335,15 +518,28 @@ final class WebSocketClient: NSObject, ObservableObject {
     }
 
     private func handleDisconnection() {
+        stopHeartbeat()
         guard shouldReconnect else { return }
+
+        // Cancel any existing pending reconnect work item
+        cancelPendingReconnect()
+
         reconnectAttempt += 1
         let delaySec = min(Double(reconnectAttempt * 2), 15.0)
-        print("[WS] Will attempt reconnection in \(delaySec)s (attempt #\(reconnectAttempt))...")
+        let sessionPrefix = activeSessionId.uuidString.prefix(8)
+        print("[WS] Scheduling reconnection in \(delaySec)s (attempt #\(reconnectAttempt)) [Session: \(sessionPrefix)]...")
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + delaySec) { [weak self] in
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.shouldReconnect else { return }
             self.reconnectUsingSavedCredentials()
         }
+        self.pendingReconnectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySec, execute: workItem)
+    }
+
+    private func cancelPendingReconnect() {
+        pendingReconnectWorkItem?.cancel()
+        pendingReconnectWorkItem = nil
     }
 
     private func getOrCreateClientId() -> String {
@@ -361,3 +557,4 @@ final class WebSocketClient: NSObject, ObservableObject {
         let type: String
     }
 }
+

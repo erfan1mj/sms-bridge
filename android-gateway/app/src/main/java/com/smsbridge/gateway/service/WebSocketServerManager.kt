@@ -173,7 +173,7 @@ class WebSocketServerManager(
 
     private inner class InternalWebSocketServer(address: InetSocketAddress) : WebSocketServer(address) {
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake?) {
-            Log.d(TAG, "New incoming client connection: ${conn.remoteSocketAddress}")
+            Log.i(TAG, "[DIAGNOSTICS] [Session: ${conn.remoteSocketAddress}] Connection opened")
             sessionMap[conn] = SessionState()
             updateClientCounts()
 
@@ -182,16 +182,21 @@ class WebSocketServerManager(
                 delay(15_000)
                 val state = sessionMap[conn]
                 if (state != null && state.authenticatedClientId == null && conn.isOpen) {
-                    Log.w(TAG, "Closing unauthenticated connection timeout: ${conn.remoteSocketAddress}")
+                    Log.w(TAG, "[DIAGNOSTICS] [Session: ${conn.remoteSocketAddress}] Closing unauthenticated connection timeout")
                     conn.close(4001, "Authentication timeout")
                 }
             }
         }
 
         override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
-            Log.d(TAG, "Client disconnected: ${conn.remoteSocketAddress}, code=$code, reason=$reason")
+            Log.i(TAG, "[DIAGNOSTICS] [Session: ${conn.remoteSocketAddress}] Connection closed (code=$code, reason=$reason, remote=$remote)")
             sessionMap.remove(conn)
             updateClientCounts()
+        }
+
+        override fun onWebsocketPing(conn: WebSocket, f: org.java_websocket.framing.Framedata) {
+            super.onWebsocketPing(conn, f)
+            Log.d(TAG, "[DIAGNOSTICS] [Session: ${conn.remoteSocketAddress}] Ping frame received from client, replying with pong")
         }
 
         override fun onMessage(conn: WebSocket, message: String) {
@@ -202,6 +207,7 @@ class WebSocketServerManager(
                     sessionAuthenticatedClientId = state.authenticatedClientId,
                     onAuthenticated = { clientId ->
                         state.authenticatedClientId = clientId
+                        Log.i(TAG, "[DIAGNOSTICS] [Session: ${conn.remoteSocketAddress}] Authenticated client: ${clientId.take(8)}...")
                         updateClientCounts()
                     }
                 )
@@ -212,7 +218,7 @@ class WebSocketServerManager(
         }
 
         override fun onError(conn: WebSocket?, ex: Exception) {
-            Log.e(TAG, "WebSocket server error on conn: ${conn?.remoteSocketAddress}", ex)
+            Log.e(TAG, "[DIAGNOSTICS] [Session: ${conn?.remoteSocketAddress}] WebSocket error", ex)
         }
 
         override fun onStart() {

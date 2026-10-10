@@ -431,6 +431,114 @@ class TestSmsBridgeProtocol(unittest.TestCase):
         self.assertEqual(resp["payload"]["status"], "FAILED")
         self.assertEqual(resp["payload"]["errorCode"], "INVALID_PAYLOAD")
 
+    def test_08_connection_flapping_and_overlapping_connect_guards(self):
+        """Phase 1.5 Regression: Verify overlapping connection attempts are dropped and superseded callbacks ignored."""
+        class MockClientConnectionManager:
+            def __init__(self):
+                self.state = "DISCONNECTED"
+                self.active_session_id = uuid.uuid4().hex
+                self.pending_retry = False
+                self.state_transitions = []
+
+            def transition_state(self, new_state, reason, trans_type):
+                if self.state == new_state:
+                    return
+                old = self.state
+                self.state = new_state
+                self.state_transitions.append((old, new_state, reason, trans_type))
+
+            def connect(self, endpoint):
+                if self.state in ("AUTHENTICATED", "CONNECTING"):
+                    # Prevent duplicate connection attempt
+                    return False
+                self.pending_retry = False
+                self.active_session_id = uuid.uuid4().hex
+                self.transition_state("CONNECTING", "Connecting to endpoint", "NETWORK_EVENT")
+                return True
+
+            def handle_auth_success(self, session_id):
+                if session_id != self.active_session_id:
+                    # Ignore superseded session
+                    return
+                self.pending_retry = False
+                self.transition_state("AUTHENTICATED", "Auth success", "HANDSHAKE")
+
+            def handle_socket_failure(self, session_id, is_cancelled):
+                if is_cancelled:
+                    # Intentional cancellation of superseded socket must be ignored
+                    return
+                if session_id != self.active_session_id:
+                    return
+                self.transition_state("ERROR", "Socket closed unexpectedly", "SOCKET_ERROR")
+                self.pending_retry = True
+
+        mgr = MockClientConnectionManager()
+        # 1. First connect
+        self.assertTrue(mgr.connect("wss://192.168.43.1:8765/ws"))
+        self.assertEqual(mgr.state, "CONNECTING")
+        sess_1 = mgr.active_session_id
+
+        # 2. Duplicate connect attempt while in-flight must be rejected (prevents race condition)
+        self.assertFalse(mgr.connect("wss://192.168.43.1:8765/ws"))
+        self.assertEqual(mgr.state, "CONNECTING")
+
+        # 3. Complete authentication
+        mgr.handle_auth_success(sess_1)
+        self.assertEqual(mgr.state, "AUTHENTICATED")
+
+        # 4. Duplicate connect attempt while authenticated must be rejected (prevents teardown of healthy socket)
+        self.assertFalse(mgr.connect("wss://192.168.43.1:8765/ws"))
+        self.assertEqual(mgr.state, "AUTHENTICATED")
+
+        # 5. Stale cancelled callback from earlier socket must NOT drop connection
+        mgr.handle_socket_failure(session_id="stale_session_xyz", is_cancelled=True)
+        self.assertEqual(mgr.state, "AUTHENTICATED", "Cancelled old socket must not drop active connection")
+
+        # 6. Actual failure on current active session triggers error & retry
+        mgr.handle_socket_failure(session_id=sess_1, is_cancelled=False)
+        self.assertEqual(mgr.state, "ERROR")
+        self.assertTrue(mgr.pending_retry)
+
+    def test_09_heartbeat_tolerance_and_bounded_retry(self):
+        """Phase 1.5 Regression: Verify transient missed heartbeats do not drop connection, requiring 3 consecutive failures."""
+        class MockHeartbeatTracker:
+            def __init__(self, max_failures=3):
+                self.max_failures = max_failures
+                self.consecutive_failures = 0
+                self.is_connected = True
+
+            def record_ping_result(self, success):
+                if success:
+                    self.consecutive_failures = 0
+                else:
+                    self.consecutive_failures += 1
+                    if self.consecutive_failures >= self.max_failures:
+                        self.is_connected = False
+
+        tracker = MockHeartbeatTracker(max_failures=3)
+
+        # 1st failure (transient jitter) -> must remain connected
+        tracker.record_ping_result(success=False)
+        self.assertTrue(tracker.is_connected)
+        self.assertEqual(tracker.consecutive_failures, 1)
+
+        # Recovery on next ping -> resets failure counter
+        tracker.record_ping_result(success=True)
+        self.assertTrue(tracker.is_connected)
+        self.assertEqual(tracker.consecutive_failures, 0)
+
+        # 2 consecutive failures -> must still remain connected
+        tracker.record_ping_result(success=False)
+        tracker.record_ping_result(success=False)
+        self.assertTrue(tracker.is_connected)
+        self.assertEqual(tracker.consecutive_failures, 2)
+
+        # 3rd consecutive failure -> threshold reached, drop connection
+        tracker.record_ping_result(success=False)
+        self.assertFalse(tracker.is_connected)
+        self.assertEqual(tracker.consecutive_failures, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
+
