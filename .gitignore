@@ -1,0 +1,8 @@
+android-sdk/
+scratch/
+**/build/
+.gradle/
+local.properties
+*.apk
+*.ipa
+*.xcodeproj/

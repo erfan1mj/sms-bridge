@@ -1,0 +1,23 @@
+name: SMSBridge
+options:
+  bundleIdPrefix: com.smsbridge
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    PRODUCT_BUNDLE_IDENTIFIER: com.smsbridge.iosclient
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    INFOPLIST_FILE: Info.plist
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  SMSBridge:
+    type: application
+    platform: iOS
+    sources:
+      - path: .
+        excludes:
+          - Tests
+          - project.yml
+          - Info.plist

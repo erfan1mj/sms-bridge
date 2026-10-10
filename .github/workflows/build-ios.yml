@@ -1,0 +1,45 @@
+name: Build iOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ios-client/**'
+      - '.github/workflows/build-ios.yml'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios-client
+        run: xcodegen generate
+
+      - name: Build unsigned archive
+        working-directory: ios-client
+        run: |
+          xcodebuild archive \
+            -project SMSBridge.xcodeproj \
+            -scheme SMSBridge \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/SMSBridge.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Package IPA
+        working-directory: ios-client
+        run: |
+          mkdir -p Payload
+          cp -R build/SMSBridge.xcarchive/Products/Applications/SMSBridge.app Payload/
+          zip -r SMSBridge.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMSBridge-ipa
+          path: ios-client/SMSBridge.ipa

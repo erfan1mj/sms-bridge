@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">SMS Bridge Gateway</string>
+    <string name="service_notification_channel_name">SMS Bridge Background Service</string>
+    <string name="service_notification_channel_desc">Maintains secure local connection with paired iPhone</string>
+    <string name="service_running_title">SMS Bridge is Active</string>
+    <string name="service_running_desc">Listening for iPhone on local network</string>
+    <string name="action_stop">Stop Bridge</string>
+</resources>

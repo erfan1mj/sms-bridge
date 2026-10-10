@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SmsBridgeProtocolV1",
+  "description": "JSON schema for Android-to-iPhone SMS Bridge Protocol v1",
+  "type": "object",
+  "required": ["version", "id", "type", "payload"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [1]
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "PAIR_REQUEST",
+        "PAIR_RESPONSE",
+        "AUTHENTICATE",
+        "AUTH_RESPONSE",
+        "CONNECTION_STATUS",
+        "SMS_INCOMING",
+        "SMS_SEND_REQUEST",
+        "SMS_SEND_RESULT",
+        "SMS_DELIVERY_STATUS",
+        "SYNC_REQUEST",
+        "SYNC_RESPONSE",
+        "ERROR"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
