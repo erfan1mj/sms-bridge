@@ -106,7 +106,7 @@ final class WebSocketClient: NSObject, ObservableObject {
             print("[WS] Already authenticated and connected; ignoring redundant reconnect request.")
             return
         }
-        if case .connecting = connectionState || case .connectedUnauthenticated = connectionState {
+        if connectionState == .connecting || connectionState == .connectedUnauthenticated {
             print("[WS] Connection already in progress; ignoring duplicate attempt.")
             return
         }
@@ -131,7 +131,7 @@ final class WebSocketClient: NSObject, ObservableObject {
             print("[WS] Already authenticated to \(endpointString); skipping duplicate connection.")
             return
         }
-        if case .connecting = connectionState, currentEndpoint == endpointString {
+        if connectionState == .connecting && currentEndpoint == endpointString {
             print("[WS] Connection already in progress to \(endpointString); skipping duplicate connection.")
             return
         }
