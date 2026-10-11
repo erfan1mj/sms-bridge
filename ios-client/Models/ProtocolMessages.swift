@@ -38,7 +38,7 @@ struct SimCardInfo: Codable, Identifiable, Hashable {
     let displayName: String
     let carrierName: String
     let slotIndex: Int
-    let isDefault: BooleanLiteralType
+    let isDefault: Bool
 }
 
 struct PairRequestPayload: Codable {

@@ -1,10 +1,13 @@
 package com.smsbridge.gateway.service
 
+import android.util.Log
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
 
 object NetworkUtils {
+    private const val TAG = "NetworkUtils"
+
     /**
      * Discovers all non-loopback IPv4 addresses assigned to the Android device.
      * Categorizes into Hotspot and Wi-Fi where possible.
@@ -26,10 +29,10 @@ object NetworkUtils {
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to retrieve network interfaces", e)
         }
         // If Android hotspot is enabled, 192.168.43.1 is the standard AP IP. Prioritize it.
-        return addresses.sortedWith(Comparator { a, b ->
+        return addresses.sortedWith { a, b ->
             when {
                 a.startsWith("192.168.43.") -> -1
                 b.startsWith("192.168.43.") -> 1
@@ -37,7 +40,7 @@ object NetworkUtils {
                 b.startsWith("192.168.") -> 1
                 else -> a.compareTo(b)
             }
-        })
+        }
     }
 
     fun getWebSocketEndpoints(port: Int): List<String> {

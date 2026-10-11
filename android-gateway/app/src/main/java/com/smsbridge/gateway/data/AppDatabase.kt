@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +29,7 @@ class AppDatabase private constructor(context: Context) {
             requestsStateFlow.value = queryAllRequestsSync()
             clientsStateFlow.value = queryActiveClientsSync()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error refreshing database StateFlows", e)
         }
     }
 
@@ -404,6 +405,8 @@ class AppDatabase private constructor(context: Context) {
     }
 
     companion object {
+        private const val TAG = "AppDatabase"
+
         @Volatile
         private var instance: AppDatabase? = null
 

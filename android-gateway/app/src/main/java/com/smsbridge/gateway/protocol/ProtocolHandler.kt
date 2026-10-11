@@ -30,7 +30,7 @@ class ProtocolHandler(
     ): String {
         return try {
             val jsonObject = JsonParser.parseString(rawJson).asJsonObject
-            val type = jsonObject.get("type")?.asString ?: return createErrorJson("INVALID_PAYLOAD", "Missing message type")
+            val type = jsonObject.get("type")?.asString ?: return createErrorJson(ErrorCodes.INVALID_PAYLOAD, "Missing message type")
             val id = jsonObject.get("id")?.asString ?: UUID.randomUUID().toString()
             val payloadElement = jsonObject.get("payload") ?: JsonObject()
 

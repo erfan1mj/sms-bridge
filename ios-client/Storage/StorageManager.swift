@@ -165,17 +165,24 @@ final class StorageManager: ObservableObject {
     // MARK: - File Persistence
 
     private func saveData() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
+        let convSnapshot = self.conversations
+        let msgSnapshot = self.messagesByConversation
+        let syncMetaSnapshot = self.lastSyncTimestamp
+        let targetDirectory = self.storageDirectory
+        let convFile = self.conversationsFileName
+        let msgFile = self.messagesFileName
+        let metaFile = self.syncMetaFileName
+
+        DispatchQueue.global(qos: .utility).async {
             do {
-                let convData = try JSONEncoder().encode(self.conversations)
-                try convData.write(to: self.storageDirectory.appendingPathComponent(self.conversationsFileName))
+                let convData = try JSONEncoder().encode(convSnapshot)
+                try convData.write(to: targetDirectory.appendingPathComponent(convFile), options: .atomic)
 
-                let msgData = try JSONEncoder().encode(self.messagesByConversation)
-                try msgData.write(to: self.storageDirectory.appendingPathComponent(self.messagesFileName))
+                let msgData = try JSONEncoder().encode(msgSnapshot)
+                try msgData.write(to: targetDirectory.appendingPathComponent(msgFile), options: .atomic)
 
-                let metaData = try JSONEncoder().encode(self.lastSyncTimestamp)
-                try metaData.write(to: self.storageDirectory.appendingPathComponent(self.syncMetaFileName))
+                let metaData = try JSONEncoder().encode(syncMetaSnapshot)
+                try metaData.write(to: targetDirectory.appendingPathComponent(metaFile), options: .atomic)
             } catch {
                 print("StorageManager error saving data: \(error)")
             }

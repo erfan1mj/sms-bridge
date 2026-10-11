@@ -175,7 +175,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             bitmap
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("MainViewModel", "Failed to generate QR code bitmap", e)
             null
         }
     }
