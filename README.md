@@ -1,203 +1,596 @@
-# Android-to-iPhone SMS Bridge (MVP v1)
+# 📱 Android-to-iPhone SMS Bridge
 
-A native, personal-use SMS bridging system allowing an iPhone to send and receive cellular SMS messages through a SIM card installed in an Android smartphone.
+**Turn your iPhone into a cellular SMS client powered by your Android phone.**
 
-Communication occurs **directly over your local Wi-Fi network or Android Hotspot**. No cloud servers, external accounts, third-party messaging services, or subscription fees are required.
+A native, privacy-focused SMS bridge that lets you send and receive real cellular SMS messages on your iPhone using the SIM card installed in an Android device — directly over your local Wi-Fi network or Android hotspot.
 
----
+No cloud servers. No third-party messaging services. No subscription fees.
 
-## 1. Architecture Overview
+Built with **Kotlin, Jetpack Compose, Swift, and SwiftUI**, this project combines native mobile development, cellular telephony, secure networking, and reliable message synchronization in a single personal-use system.
 
-The system consists of two native applications and a versioned bidirectional protocol:
+<p align="center">
 
-```
-┌─────────────────────────────────┐                ┌──────────────────────────────────┐
-│         Android Gateway         │                │          iPhone Client           │
-│   (Kotlin / Jetpack Compose)    │                │         (Swift / SwiftUI)        │
-│                                 │                │                                  │
-│ • Cellular Radio (SIM 1 / SIM 2)│                │ • Conversations UI & Bubbles     │
-│ • Telephony SmsManager / PDU Rcv│  Local Wi-Fi   │ • Message Composer (GSM/Unicode) │
-│ • Room Database (Persist & Sync)│ ────────────── │ • In-App SMS State Engine        │
-│ • TLSv1.3 WebSocket Host (8765) │ or AP Hotspot  │ • Keychain Token & Pin Storage   │
-│ • Out-of-band SHA-256 TLS Pin   │  (WSS / JSON)  │ • Pinned TLS Certificate Verifier│
-│ • Foreground Service (Keepalive)│                │ • Auto-Reconnect & Offline Sync  │
-└─────────────────────────────────┘                └──────────────────────────────────┘
-```
+  **Android Gateway** · **iOS Client** · **End-to-End Local Communication**
 
-### 1.1 Android Gateway (`/android-gateway`)
-- **Language / Framework:** Kotlin, Jetpack Compose, Material 3, Coroutines & Flow.
-- **Data Persistence:** Room Database (`messages`, `sent_requests`, `paired_clients`).
-- **Networking:** Embedded TLS WebSocket Server with mutual session validation and connection timeout.
-- **Security:** Self-signed X.509 certificate generated on-device with SHA-256 fingerprint displayed via QR code; certificate pinning enforced by client.
-- **Telephony:** Intercepts incoming SMS via `android.provider.Telephony.SMS_RECEIVED`, parses PDUs, concatenates multipart messages, routes outgoing SMS via `SmsManager.sendTextMessage()` / `sendMultipartTextMessage()`, tracks exact radio transmission (`SMS_SENT`) and carrier delivery receipts (`SMS_DELIVERED`).
-- **Multi-SIM:** Detects installed SIM subscriptions via `SubscriptionManager` and routes messages to user-selected SIMs.
-
-### 1.2 iPhone Client (`/ios-client`)
-- **Language / Framework:** Swift, SwiftUI, NavigationStack, async/await, Combine.
-- **Networking:** Native `URLSessionWebSocketTask` with a custom `TLSPinningDelegate`. **TLS certificate verification is never disabled**; it validates the server certificate against the pinned SHA-256 hash scanned from the physical QR code.
-- **Storage:** Secure iOS Keychain for auth tokens and pinned certificate hash; local JSON cache for conversation threads.
-- **User Interface:**
-  - **Connection Screen:** Real-time connection badge, AVFoundation camera QR code scanner, manual connection fallback, gateway diagnostics.
-  - **Conversations Screen:** Thread list grouped by phone number, message preview, timestamp, unread count badge, and new conversation composer.
-  - **Conversation Detail:** Chat bubble interface, chronological ordering, sending status indicators (`QUEUED`, `SUBMITTED`, `SENT`, `DELIVERED`, `FAILED`), SMS parts estimation (GSM vs Unicode/Persian), and SIM card selector.
-  - **Settings Screen:** Paired device info, synchronization diagnostics, force sync, local cache clearing, and pairing revocation.
-
-### 1.3 Shared Protocol (`/shared-protocol`)
-- Versioned JSON messaging over TLS WebSocket (`wss://[android-ip]:8765/ws`).
-- Message types: `PAIR_REQUEST`, `PAIR_RESPONSE`, `AUTHENTICATE`, `AUTH_RESPONSE`, `CONNECTION_STATUS`, `SMS_INCOMING`, `SMS_SEND_REQUEST`, `SMS_SEND_RESULT`, `SMS_DELIVERY_STATUS`, `SYNC_REQUEST`, `SYNC_RESPONSE`, `ERROR`.
-- Full specification documented in [PROTOCOL.md](file:///d:/claude/god%20project/shared-protocol/PROTOCOL.md) and [protocol.json](file:///d:/claude/god%20project/shared-protocol/protocol.json).
+</p>
 
 ---
 
-## 2. Android Permissions & System Role Analysis
+## ✨ Highlights
 
-A complete architectural breakdown is provided in [PERMISSIONS_AND_ROLES.md](file:///d:/claude/god%20project/docs/PERMISSIONS_AND_ROLES.md).
+- 📩 **Real Cellular SMS** — Send and receive SMS through your Android phone's SIM card.
+- 🔒 **TLS Certificate Pinning** — Authenticate the Android gateway using a SHA-256 certificate fingerprint exchanged during pairing.
+- 📡 **Local-First Architecture** — Communicate over local Wi-Fi or an Android hotspot without a cloud backend.
+- 🔗 **Secure Device Pairing** — Pair devices using a QR code and a short-lived pairing token.
+- 🔄 **Automatic Synchronization** — Recover missed messages when the iPhone reconnects.
+- 🛡️ **Duplicate-Send Protection** — Use persistent request IDs to prevent duplicate sends during network retries.
+- 🌐 **Persian & Unicode Support** — Handle non-Latin text and estimate SMS segmentation.
+- 📲 **Dual-SIM Support** — Detect available SIM subscriptions and select a SIM for outgoing messages.
+- 💬 **Native User Interfaces** — Modern Jetpack Compose and SwiftUI interfaces.
+- 💾 **Local Persistence** — Store messages and request states on the Android gateway for synchronization and recovery.
 
-| Permission | Category | Purpose in SMS Bridge |
-|---|---|---|
-| `android.permission.RECEIVE_SMS` | Runtime / Dangerous | Intercepts incoming cellular SMS broadcasts (`SMS_RECEIVED`), parses PDUs, concatenates multipart parts, and saves them locally. **Does NOT require being the default SMS app.** |
-| `android.permission.SEND_SMS` | Runtime / Dangerous | Transmits outgoing SMS via `SmsManager`. Listens to `PendingIntent` callbacks for exact radio send status. **Does NOT require being the default SMS app.** |
-| `android.permission.READ_PHONE_STATE` | Runtime / Dangerous | Queries `SubscriptionManager` to identify active physical SIM cards and eSIMs on Dual-SIM devices. |
-| `android.permission.FOREGROUND_SERVICE` | Normal | Keeps the local TLS WebSocket server and socket connection alive when the app is minimized or the screen is locked. |
-| `android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE` | Normal (Android 14+) | Explicit Android 14+ foreground service type for connected peripheral / bridge communication. |
-| `android.permission.POST_NOTIFICATIONS` | Runtime (Android 13+) | Displays the persistent foreground service notification with a "Stop Bridge" action. |
-
-### Why SMS Bridge does NOT force Default SMS App status:
-- On Android, setting an app as the default SMS app causes the primary messaging application (e.g., Google Messages) to stop receiving incoming SMS and MMS notifications, disrupting regular phone use.
-- The SMS Bridge operates reliably using only standard `RECEIVE_SMS` and `SEND_SMS` permissions.
-- *Limitation:* Messages sent by the bridge will reach the cellular recipient, but Android prevents non-default apps from writing to the system provider (`content://sms/`), meaning sent messages will appear in the SMS Bridge app and on the iPhone, but not in Google Messages.
-- An in-app informational card explains these trade-offs to the user before offering any default role change.
+> **Project status:** Personal-use MVP. The architecture and feature set described here are intended to be validated through automated tests and physical-device testing. See the testing section for the verification workflow.
 
 ---
 
-## 3. Pairing and Connection Workflow
+## 🏗️ Architecture
 
-```
-[Android Phone]                                    [iPhone]
-       │                                              │
-       ├─ Start Bridge (Binds wss://0.0.0.0:8765/ws)  │
-       ├─ Generate 5-min pairing token & cert SHA-256 │
-       ├─ Display QR Code on screen                   │
-       │                                              ├─ Scan QR via Camera
-       │ ◄─────── TLS Handshake (Pinning check) ──────┤ (Verify cert SHA-256)
-       │ ◄─────── PAIR_REQUEST (token, name) ─────────┤
-       ├─ Validate token; issue clientAuthToken       │
-       ├───────── PAIR_RESPONSE (authToken, SIMs) ───►│ (Store in Keychain)
-       │                                              ├─ SYNC_REQUEST (cursor 0)
-       ├───────── SYNC_RESPONSE (missed messages) ────►│
-       │                                              │
-  [AUTHENTICATED]                                [AUTHENTICATED]
+The system consists of two native applications connected through a shared, versioned JSON protocol.
+
+```mermaid
+flowchart LR
+    subgraph Android["Android Gateway"]
+        SIM["Cellular SIM"]
+        TEL["Android Telephony APIs"]
+        DB["Room Database"]
+        WS["TLS WebSocket Server"]
+        SIM --> TEL
+        TEL --> DB
+        DB <--> WS
+    end
+
+    subgraph iPhone["iPhone Client"]
+        NET["Secure WebSocket Client"]
+        SYNC["Message Synchronization"]
+        UI["SwiftUI Conversations"]
+        STORE["Local Cache & Keychain"]
+        NET <--> SYNC
+        SYNC <--> UI
+        SYNC <--> STORE
+    end
+
+    WS <--> |"WSS / JSON over Local Wi-Fi"| NET
 ```
 
-### Out-of-Band Certificate Pinning (RFC-grade security)
-To prevent Man-in-the-Middle (MITM) attacks on untrusted Wi-Fi networks without relying on external public Certificate Authorities:
-1. Android generates an X.509 self-signed certificate upon first launch and computes its SHA-256 fingerprint.
-2. The fingerprint is embedded directly in the visual QR code scanned by the iPhone.
-3. During the TLS handshake, iOS's `TLSPinningDelegate` extracts the server certificate, hashes it with `CryptoKit.SHA256`, and compares it with the scanned hash. If they do not match, the connection is instantly rejected. **TLS certificate verification is never bypassed.**
+### How it works
+
+1. Start the bridge on the Android device.
+2. Generate a temporary pairing token and display the gateway's certificate fingerprint in a QR code.
+3. Scan the QR code from the iPhone and establish a TLS connection.
+4. Authenticate the iPhone and store its authorization token securely.
+5. Synchronize previously stored messages.
+6. Send and receive cellular SMS through the Android gateway while the devices are connected.
+7. Recover missed updates when the iPhone reconnects.
+
+**Important:** Cellular SMS travels through the mobile carrier. The local connection transports message requests and results between your devices; it does not replace the carrier's SMS infrastructure.
 
 ---
 
-## 4. Outgoing SMS Lifecycle & Idempotency
+## 🧩 Project Components
 
-Every outgoing message submitted by the iPhone assigns an idempotency key (`requestId`, e.g. `req_iphone_<UUID>`).
+### 1. Android Gateway — `/android-gateway`
 
+The Android application acts as the cellular gateway and local WebSocket server.
+
+**Technology stack**
+
+- Kotlin
+- Jetpack Compose
+- Material 3
+- Kotlin Coroutines and Flow
+- Room Database
+- Android Telephony APIs
+- TLS-enabled WebSocket server
+
+**Responsibilities**
+
+- Receive incoming SMS using `SMS_RECEIVED`.
+- Parse incoming SMS PDUs and assemble multipart messages.
+- Send SMS using `SmsManager`.
+- Track radio transmission results and, when supported, carrier delivery reports.
+- Detect available SIM subscriptions and route outgoing messages to the selected subscription.
+- Persist messages, send requests, and paired-client information.
+- Host the local WebSocket endpoint at port `8765`.
+- Generate and display the gateway's TLS certificate fingerprint.
+- Manage pairing, authentication, reconnection, and synchronization.
+- Run a foreground service to support background gateway operation.
+
+### 2. iPhone Client — `/ios-client`
+
+The iOS application provides the messaging interface and communicates with the Android gateway.
+
+**Technology stack**
+
+- Swift
+- SwiftUI
+- `URLSessionWebSocketTask`
+- Swift Concurrency (`async/await`)
+- Combine
+- AVFoundation
+- CryptoKit
+- iOS Keychain
+
+**Responsibilities**
+
+- Scan the Android pairing QR code.
+- Validate the pinned TLS certificate during connection establishment.
+- Store authorization tokens and certificate fingerprints in Keychain.
+- Display conversations grouped by phone number.
+- Compose and send SMS messages.
+- Estimate GSM and Unicode SMS segmentation.
+- Display message transmission and delivery states.
+- Synchronize missed messages after reconnection.
+- Show connection diagnostics and paired-device information.
+- Support local-cache management and pairing revocation.
+
+### 3. Shared Protocol — `/shared-protocol`
+
+Both applications use a versioned JSON protocol over a TLS-protected WebSocket connection.
+
+**Endpoint**
+
+```text
+wss://<android-ip>:8765/ws
 ```
-iPhone: QUEUED ──► Android: SUBMITTED ──► Radio: SENT ──► Carrier: DELIVERED
-                         │                   │                 │
-                         └──► FAILED ────────┴──► FAILED ──────┘
-```
 
-1. **`QUEUED`**: Message recorded in iPhone local store before dispatch.
-2. **`SUBMITTED`**: Android Gateway authenticated the request, verified permissions and SIM availability, and passed message parts to `SmsManager`.
-3. **`SENT`**: Radio confirmed cellular transmission via `PendingIntent` callback (`Activity.RESULT_OK`).
-4. **`DELIVERED`**: Carrier delivery report received via `SMS_DELIVERED_ACTION` PDU.
-5. **`FAILED`**: Explicit radio error (`RESULT_ERROR_NO_SERVICE`, `RESULT_ERROR_RADIO_OFF`, `GENERIC_FAILURE`, or invalid number).
-6. **Network Reconnection / Retry Safety:** If the Wi-Fi connection drops while sending, the iPhone re-queries status for the same `requestId`. Android returns the existing status from its Room database and **never sends a duplicate SMS**.
+**Supported protocol message types**
+
+| Message | Purpose |
+|---|---|
+| `PAIR_REQUEST` | Initiate device pairing |
+| `PAIR_RESPONSE` | Return pairing and authorization information |
+| `AUTHENTICATE` | Authenticate an existing paired client |
+| `AUTH_RESPONSE` | Return authentication status |
+| `CONNECTION_STATUS` | Report gateway connectivity |
+| `SMS_INCOMING` | Deliver an incoming SMS event |
+| `SMS_SEND_REQUEST` | Request an outgoing SMS |
+| `SMS_SEND_RESULT` | Report the send request's status |
+| `SMS_DELIVERY_STATUS` | Report carrier delivery status |
+| `SYNC_REQUEST` | Request message synchronization |
+| `SYNC_RESPONSE` | Return synchronized messages |
+| `ERROR` | Report protocol or processing errors |
+
+Protocol documentation:
+
+- `shared-protocol/PROTOCOL.md`
+- `shared-protocol/protocol.json`
 
 ---
 
-## 5. Directory Structure
+## 🔐 Security Design
 
+Security is a core part of the bridge architecture.
+
+### TLS certificate pinning
+
+The Android gateway uses a self-signed X.509 certificate. Its SHA-256 fingerprint is displayed in the pairing QR code and transferred to the iPhone through the initial pairing workflow.
+
+The iOS client is designed to compare the presented server certificate against the stored pin and reject certificates that do not match.
+
+**TLS certificate validation must never be disabled to make the connection work.**
+
+### Device pairing
+
+- Pairing tokens expire after five minutes.
+- Authorization tokens are issued after successful pairing.
+- Existing clients must authenticate before accessing protected protocol operations.
+- Pairing can be revoked to prevent future access.
+
+### Local-first data handling
+
+- No cloud backend is required by the architecture.
+- Messages are persisted locally on the Android gateway.
+- iOS authorization credentials are stored in Keychain.
+- Communication between the devices uses the local network.
+
+### Security considerations
+
+Certificate pinning is only one part of a secure implementation. Before relying on the bridge for sensitive communications, verify:
+
+- Server certificate validation and hostname or endpoint binding.
+- Token entropy, expiration, revocation, and secure storage.
+- Authentication on every protected WebSocket operation.
+- Protection against replayed requests and unauthorized message injection.
+- Database and local-cache exposure.
+- Network binding, firewall behavior, and device trust.
+- Correct TLS configuration and secure error handling.
+
+The QR-code pairing flow is intended to establish trust between devices. Its actual security depends on the complete implementation and testing of the pairing and authentication protocol.
+
+---
+
+## 📩 SMS Delivery Lifecycle
+
+The bridge distinguishes between accepting a request, transmitting an SMS, and receiving a delivery report.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> SUBMITTED
+    QUEUED --> FAILED
+    SUBMITTED --> SENT
+    SUBMITTED --> FAILED
+    SENT --> DELIVERED
+    SENT --> FAILED
 ```
+
+| State | Meaning |
+|---|---|
+| `QUEUED` | The iPhone has recorded the outgoing request locally. |
+| `SUBMITTED` | The Android gateway has accepted the request and submitted it to the telephony API. |
+| `SENT` | Android received a successful SMS transmission callback. |
+| `DELIVERED` | A carrier delivery report was received, when supported. |
+| `FAILED` | A reported error prevented the requested operation from succeeding. |
+
+### Idempotency and retry safety
+
+Each outgoing request carries a unique `requestId`, such as:
+
+```text
+req_iphone_<UUID>
+```
+
+The Android gateway stores request state and uses the identifier to recognize retries.
+
+If the iPhone loses its connection while sending a message, it can query the existing request's status rather than blindly issuing another send operation.
+
+**Implementation note:** Exactly-once SMS transmission cannot be guaranteed solely through an application-level request ID. A crash or connection loss between the cellular send operation and durable status recording can leave the outcome uncertain. The implementation must explicitly handle that state to minimize duplicate messages.
+
+---
+
+## 📲 Android Permissions & SMS Role
+
+The gateway is designed to use Android's SMS permissions without automatically replacing the user's default messaging application.
+
+| Permission | Purpose |
+|---|---|
+| `RECEIVE_SMS` | Receive incoming SMS broadcasts |
+| `SEND_SMS` | Submit outgoing cellular SMS |
+| `READ_PHONE_STATE` | Access relevant telephony and subscription information |
+| `FOREGROUND_SERVICE` | Run a foreground service |
+| `FOREGROUND_SERVICE_CONNECTED_DEVICE` | Support the relevant connected-device foreground-service configuration on Android 14+ |
+| `POST_NOTIFICATIONS` | Display foreground-service notifications where applicable |
+
+Permissions and service declarations must match the target Android version and the exact implementation.
+
+### Why not automatically become the default SMS app?
+
+The goal is to preserve the existing messaging application's role wherever Android permits.
+
+A non-default SMS application may send SMS with the appropriate permission and receive `SMS_RECEIVED` broadcasts, subject to platform behavior and device restrictions. However, it generally cannot write outgoing messages into the system SMS provider like the default SMS application.
+
+Consequently, messages sent through the bridge may not appear in Google Messages on the Android device.
+
+For a personal-use installation, review the permissions and role implications before enabling the gateway.
+
+---
+
+## 🔄 Synchronization & Offline Recovery
+
+The Android gateway stores messages and request states so that the iPhone can recover missed updates.
+
+The intended synchronization workflow is:
+
+1. The iPhone connects and authenticates.
+2. It submits a `SYNC_REQUEST` with its current synchronization cursor.
+3. The Android gateway returns relevant missed messages and state updates.
+4. The iPhone updates its local cache.
+5. Subsequent synchronization requests use an updated cursor.
+
+This design supports recovery after temporary Wi-Fi interruptions without requiring a cloud database.
+
+### iOS background limitation
+
+iOS can suspend applications running in the background. The client cannot assume that its WebSocket connection will remain active indefinitely when the application is suspended or terminated.
+
+Incoming SMS messages can be stored on Android and synchronized when the iPhone client reconnects, typically when the application returns to the foreground.
+
+**This project does not promise continuous background SMS notifications on iOS.** Achieving remote or reliable background notification delivery would require a different architecture and potentially additional infrastructure.
+
+---
+
+## 🌐 Network Requirements
+
+The devices must be able to reach each other over a local network.
+
+Supported setups include:
+
+- Both devices connected to the same Wi-Fi network.
+- The iPhone connected to the Android phone's hotspot.
+
+The bridge does not require a public server, domain name, or cloud database.
+
+### Troubleshooting connectivity
+
+If the iPhone cannot connect:
+
+- Confirm that both devices are on the same reachable network.
+- Find the Android device's current local IP address.
+- Confirm that the gateway service is running and listening on port `8765`.
+- Check firewall rules and client isolation settings on the Wi-Fi network.
+- Confirm that the certificate fingerprint matches the QR code.
+- Check local-network permissions on iOS.
+- Review gateway diagnostics and authentication errors.
+
+Network isolation, hotspot routing, and Android battery-management policies may affect connectivity.
+
+---
+
+## 🛠️ Tech Stack
+
+| Area | Technologies |
+|---|---|
+| Android | Kotlin, Jetpack Compose, Material 3 |
+| iOS | Swift, SwiftUI |
+| Networking | TLS, WebSockets, JSON |
+| Android persistence | Room Database |
+| iOS secure storage | Keychain, CryptoKit |
+| iOS local storage | Local JSON cache |
+| Telephony | `SmsManager`, SMS broadcasts, `SubscriptionManager` |
+| Concurrency | Kotlin Coroutines, Swift Concurrency |
+| QR scanning | AVFoundation |
+| Protocol testing | Python |
+
+---
+
+## 📁 Project Structure
+
+```text
 /
-├── android-gateway/         # Native Android application
-│   ├── app/src/main/        # Kotlin source, Compose UI, Service, Room DB
-│   ├── app/build.gradle.kts # Dependencies (Room, Ktor/JavaWebSocket, ZXing)
-│   └── build.gradle.kts     # Root build file
-├── ios-client/              # Native iOS application
-│   ├── SMSBridgeApp.swift   # SwiftUI App entry point
-│   ├── Models/              # Protocol messages, Conversation, Message
-│   ├── Network/             # WebSocketClient, TLSPinningDelegate (Pinning)
-│   ├── Storage/             # StorageManager, KeychainHelper
-│   ├── Views/               # Connection, Conversations, Composer, Settings
-│   └── Info.plist           # Camera & Local Network privacy permissions
-├── shared-protocol/         # Shared Protocol specifications
-│   ├── PROTOCOL.md          # Full Protocol v1 Specification
-│   └── protocol.json        # Formal JSON Schema
-├── docs/                    # Technical documentation
-│   ├── PERMISSIONS_AND_ROLES.md # Android SMS & background execution analysis
-│   ├── TEST_CHECKLIST.md        # 17-scenario physical device testing manual
-│   └── IOS_BUILD_GUIDE.md       # Xcode build, signing, and run instructions
-└── tests/                   # Automated tests
-    └── test_protocol_and_bridge.py # Full protocol and security test suite
+├── android-gateway/
+│   ├── app/
+│   │   ├── src/main/
+│   │   └── build.gradle.kts
+│   └── build.gradle.kts
+│
+├── ios-client/
+│   ├── SMSBridgeApp.swift
+│   ├── Models/
+│   ├── Network/
+│   ├── Storage/
+│   ├── Views/
+│   └── Info.plist
+│
+├── shared-protocol/
+│   ├── PROTOCOL.md
+│   └── protocol.json
+│
+├── docs/
+│   ├── PERMISSIONS_AND_ROLES.md
+│   ├── TEST_CHECKLIST.md
+│   └── IOS_BUILD_GUIDE.md
+│
+├── tests/
+│   └── test_protocol_and_bridge.py
+│
+└── README.md
 ```
 
 ---
 
-## 6. How to Run & Test
+## 🚀 Getting Started
 
-### Automated Integration Tests
-Run the standalone protocol verification suite (tests TLS pinning, pairing, auth, idempotency, Unicode/Persian handling, and sync):
+### Prerequisites
+
+**Android gateway**
+
+- Android Studio
+- A compatible Android smartphone
+- An active SIM card
+- USB debugging and ADB for installation, if needed
+- Required runtime permissions granted
+
+**iPhone client**
+
+- A Mac running a compatible version of Xcode
+- An iPhone for physical-device testing
+- An Apple Developer account or eligible free Apple ID signing setup
+- Local-network and camera permissions
+
+**Network**
+
+- A reachable local Wi-Fi network or Android hotspot
+
+### 1. Clone the repository
+
+```bash
+git clone <your-repository-url>
+cd <repository-directory>
+```
+
+Replace the placeholder with the actual repository URL.
+
+### 2. Build the Android gateway
+
+Open the `android-gateway` directory in Android Studio, or run the Gradle wrapper from the project root:
+
+```bash
+cd android-gateway
+```
+
+On Windows:
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+On macOS or Linux:
+
+```bash
+./gradlew assembleDebug
+```
+
+If the build succeeds, the debug APK is normally generated at:
+
+```text
+android-gateway/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Install it using ADB:
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Grant the requested permissions and start the gateway.
+
+### 3. Configure the iOS client
+
+Follow `docs/IOS_BUILD_GUIDE.md`.
+
+1. Open the iOS project in Xcode.
+2. Configure the signing team and bundle identifier.
+3. Connect the iPhone.
+4. Build and run the app on the physical device.
+5. Grant camera and local-network permissions when requested.
+
+The exact project-opening instructions depend on the repository's actual Xcode project configuration.
+
+### 4. Pair the devices
+
+1. Start the gateway on Android.
+2. Open its pairing screen.
+3. Scan the displayed QR code on the iPhone.
+4. Verify the TLS certificate pin.
+5. Complete pairing and authentication.
+6. Confirm that initial synchronization succeeds.
+
+### 5. Test cellular SMS
+
+Use a test phone number you control.
+
+- Send an SMS from the iPhone through the Android SIM.
+- Reply to that number and verify that the incoming message reaches the bridge.
+- Test Persian and other Unicode text.
+- Test a multipart message.
+- Disconnect and reconnect the local network.
+- Verify message state transitions and synchronization.
+
+---
+
+## 🧪 Testing
+
+The repository includes a Python protocol and bridge test suite.
+
+Run it from the repository root:
+
 ```bash
 python tests/test_protocol_and_bridge.py -v
 ```
 
-### Building the Android Gateway
-1. **Pre-built APK Available:** The Android Gateway Debug APK has been built and is ready to install:
-   - Root location: [sms-bridge-gateway-debug.apk](file:///d:/claude/god%20project/sms-bridge-gateway-debug.apk) (20.0 MB)
-   - Gradle output location: [android-gateway/app/build/outputs/apk/debug/app-debug.apk](file:///d:/claude/god%20project/android-gateway/app/build/outputs/apk/debug/app-debug.apk)
-2. **Installing via adb:**
-   ```bash
-   adb install -r sms-bridge-gateway-debug.apk
-   ```
-3. **Building from Source:**
-   Open [/android-gateway](file:///d:/claude/god%20project/android-gateway) in Android Studio or compile via command line:
-   ```bash
-   cd android-gateway
-   ./gradlew assembleDebug
-   ```
+The intended test coverage includes:
 
-### Building the iPhone Client
-Detailed step-by-step instructions are available in [IOS_BUILD_GUIDE.md](file:///d:/claude/god%20project/docs/IOS_BUILD_GUIDE.md):
-1. Open Xcode on a Mac.
-2. Create a SwiftUI project named `SMSBridge` and import the files from `/ios-client/`.
-3. Set your free Apple ID Team under **Signing & Capabilities**.
-4. Connect your iPhone and run on the physical device.
+- Protocol message validation
+- Pairing and authentication flows
+- TLS pinning behavior
+- Request idempotency
+- Unicode and Persian text handling
+- Message synchronization and recovery
 
-### Physical Two-Device Testing
-Follow the 17-point test manual in [TEST_CHECKLIST.md](file:///d:/claude/god%20project/docs/TEST_CHECKLIST.md) to verify real SMS receiving, sending, Persian text, multipart splitting, and offline recovery.
+**Important:** Passing a standalone test suite does not prove that real SMS transmission, carrier delivery reports, background execution, or TLS behavior work on every physical device. Validate these separately.
+
+### Physical-device testing
+
+Use `docs/TEST_CHECKLIST.md` for the planned 17-scenario test workflow.
+
+At minimum, test:
+
+- Incoming and outgoing SMS
+- Dual-SIM selection
+- Long and multipart messages
+- Persian text
+- Invalid destinations and radio errors
+- Lost network connections
+- Duplicate-request recovery
+- Certificate mismatch rejection
+- Pairing revocation
+- Background service behavior
 
 ---
 
-## 7. Verified Features & Known Limitations
+## ⚠️ Known Limitations
 
-### Verified Features:
-- [x] Local peer-to-peer Wi-Fi and Android Hotspot communication.
-- [x] Out-of-band TLS certificate SHA-256 fingerprint pinning via QR code (zero cert bypass).
-- [x] Short-lived (5-minute) pairing token authentication.
-- [x] Bidirectional JSON WebSocket protocol (v1).
-- [x] Full incoming SMS reception via `RECEIVE_SMS` broadcast receiver.
-- [x] Multipart SMS concatenation in sequence.
-- [x] Full Unicode and Persian/Farsi character support.
-- [x] Dual-SIM card detection and subscription routing.
-- [x] Outgoing SMS dispatch with `PendingIntent` radio confirmation and delivery reports.
-- [x] Idempotency engine preventing duplicate SMS sends on network retries.
-- [x] Offline message buffering and cursor-based synchronization upon reconnect.
-- [x] Complete native Jetpack Compose UI (Android) and SwiftUI interface (iOS).
-- [x] Reconnection and session recovery when the iPhone app returns to foreground.
-- [x] Revoke-pairing functionality on both platforms.
+- **Android SMS provider:** Outgoing bridge messages may not appear in the default Android messaging app unless the gateway has the appropriate SMS-provider role and implementation.
+- **iOS background execution:** The client cannot guarantee a continuously active socket while suspended.
+- **Local network only:** Both devices need a reachable network path; this is not a remote-access solution by default.
+- **Carrier dependency:** SMS delivery, delivery reports, encoding, segmentation, and charges depend on the carrier and destination.
+- **Device compatibility:** Telephony permissions, dual-SIM behavior, foreground services, and battery restrictions vary by Android version and manufacturer.
+- **No MMS guarantee:** The MVP focuses on SMS and does not promise MMS support.
+- **Physical-device validation:** Hardware-dependent behavior must be tested on real devices and SIM cards.
+- **Delivery semantics:** A successful radio submission is not the same as confirmed delivery to the recipient.
 
-### Known Limitations:
-- **No System SMS Provider Write on Android:** Messages sent from the iPhone reach the cellular recipient, but do not appear in Google Messages on the Android host unless the Android Gateway is set as the default SMS app.
-- **Local Network Scope:** Both devices must be on the same local network subnet or Android hotspot; communication does not traverse cellular carrier CGNAT without a VPN or local routing.
-- **iOS Background Reception:** When the iPhone application is suspended or terminated by iOS, it cannot maintain an active TCP/TLS socket without Apple Push Notifications (APNs). Newly arrived SMS messages are buffered on Android and immediately synchronized the moment the iPhone application is reopened.
+---
+
+## 🗺️ Roadmap
+
+Potential future improvements:
+
+- [ ] Expand automated protocol and integration coverage.
+- [ ] Add stronger crash recovery for uncertain SMS send outcomes.
+- [ ] Improve message search, filtering, and conversation management.
+- [ ] Add richer diagnostics for network and telephony failures.
+- [ ] Improve handling of multipart messages and carrier-specific encoding.
+- [ ] Add robust persistence and migration tests.
+- [ ] Improve compatibility across Android manufacturers and dual-SIM devices.
+- [ ] Add optional encrypted local backups.
+- [ ] Evaluate notification strategies that respect iOS background-execution restrictions.
+
+---
+
+## 🎯 Project Goals
+
+This project explores the intersection of:
+
+- Native Android and iOS development
+- Cellular telephony APIs
+- Secure local networking
+- TLS certificate pinning
+- Device pairing and authentication
+- Distributed state synchronization
+- Idempotent request processing
+- Unicode message handling
+- Mobile background execution
+
+It is designed as a practical learning and engineering project focused on connecting two mobile platforms without depending on a cloud messaging service.
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, compatibility findings, and security reviews are welcome.
+
+When reporting an issue, include:
+
+- Android version and device model
+- iOS version and iPhone model
+- Network setup
+- Steps to reproduce the issue
+- Relevant logs with tokens, phone numbers, and other sensitive data removed
+
+For security-sensitive findings, avoid publishing exploitable details before coordinating a responsible disclosure.
+
+---
+
+## 📄 License
+
+No license has been specified yet.
+
+Add a `LICENSE` file before distributing the project or accepting contributions. Until then, do not assume that the repository is licensed for unrestricted reuse.
+
+---
+
+<p align="center">
+
+  **Built for privacy. Powered by your SIM. Connected locally.**
+
+</p>
