@@ -583,10 +583,13 @@ For security-sensitive findings, avoid publishing exploitable details before coo
 
 ## 📄 License
 
-No license has been specified yet.
+This project is licensed under the **MIT License**.
 
-Add a `LICENSE` file before distributing the project or accepting contributions. Until then, do not assume that the repository is licensed for unrestricted reuse.
+You are free to use, copy, modify, merge, publish, distribute, sublicense, and sell copies of the software, subject to the terms of the MIT License.
 
+Redistributions must retain the original copyright notice and license text.
+
+See the [`LICENSE`](LICENSE) file for the full license terms.
 ---
 
 <p align="center">
